@@ -18,7 +18,7 @@ const char* ssid = "ZAVATINI FELTRIN";
 const char* password = "19012007";
 
 // Endpoint da API
-const char* apiEndpoint = "http:15.229.0.216:8080/gravarLeituras";
+const char* apiEndpoint = "http://15.229.0.216:8080/gravarLeituras";
 const char* token = "mX9$wP7#qR2!vB8@zLtF4&GjKdY1NcU"; 
 
 // Intervalos
