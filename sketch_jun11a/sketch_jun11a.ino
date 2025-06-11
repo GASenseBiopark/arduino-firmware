@@ -1,251 +1,273 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <SPIFFS.h>
-#include <HTTPClient.h>
-#include <DHT.h>
-#include <ArduinoJson.h>
-#include "time.h"
+#include "configuracao.h"
+#include "conexao_wifi.h"
+#include "sensores.h"
+#include "comunicacao_api.h"
+#include "buffer_dados.h"
 
-#define MQ2_PIN 35
-#define MQ4_PIN 32
-#define MQ135_PIN 34
-#define DHT11_PIN 4
-#define KY026_PIN 14
-#define BUZZER_PIN 27
-
-#define DHTTYPE DHT11
-DHT dht(DHT11_PIN, DHTTYPE);
-
-// Variáveis globais
-WebServer server(80);
-bool wifiConectado = false;
-
+// Variáveis globais para credenciais Wi-Fi
 String ssid = "";
 String password = "";
 
-// Endpoint da API e token fixos
-const char* apiEndpoint = "http://15.229.0.216:8080/gravarLeituras";
-const char* token = "mX9$wP7#qR2!vB8@zLtF4&GjKdY1NcU";
+// Variáveis de configuração da API (serão obtidas de configuracao.cpp)
+String deviceId = "";
+String endpointApi = "";
+String tokenApi = "";
+String endpointApiStatus = "";
+String endpointCmdBase = "";   // Para o endpoint de comandos
 
-// Intervalos
-const unsigned long INTERVALO_NORMAL = 15000; // 15s
-const unsigned long INTERVALO_ALERTA = 1000;  // 1s
-unsigned long ultimoEnvio = 0;
+// Variáveis para controle de tempo de envio de status
+unsigned long ultimoEnvioStatus = 0;
+const unsigned long INTERVALO_ENVIO_STATUS = 300000; // 5 minutos
 
-// Limites
-const int LIMITE_MQ2 = 600;
-const int LIMITE_MQ4 = 600;
-const int LIMITE_MQ135 = 600;
-const bool LIMITE_CHAMA = true; // true = fogo detectado
+// Variáveis para controle de tempo de polling de comandos
+unsigned long ultimoPollingComandos = 0;
+const unsigned long INTERVALO_POLLING_COMANDOS = 60000; // 1 minuto
 
-// Configuração do servidor NTP
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = -10800;    // UTC-3 (horário de Brasília)
-const int daylightOffset_sec = 0;      // Sem horário de verão
-
-// Função para carregar WiFi salvo do SPIFFS
-bool carregarCredenciais() {
-  if(!SPIFFS.begin(true)){
-    Serial.println("Erro ao montar SPIFFS");
-    return false;
-  }
-  if(!SPIFFS.exists("/wifi.json")) {
-    Serial.println("Arquivo de WiFi não existe");
-    return false;
-  }
-  File file = SPIFFS.open("/wifi.json", "r");
-  if(!file) {
-    Serial.println("Erro ao abrir arquivo de WiFi");
-    return false;
-  }
-  size_t size = file.size();
-  std::unique_ptr<char[]> buf(new char[size]);
-  file.readBytes(buf.get(), size);
-  file.close();
-
-  StaticJsonDocument<256> doc;
-  auto err = deserializeJson(doc, buf.get());
-  if(err) {
-    Serial.println("Erro ao desserializar JSON");
-    return false;
-  }
-  ssid = String((const char*)doc["ssid"]);
-  password = String((const char*)doc["password"]);
-  Serial.printf("Credenciais carregadas: SSID=%s\n", ssid.c_str());
-  return true;
-}
-
-// Salvar credenciais na SPIFFS
-void salvarCredenciais(String newSsid, String newPass) {
-  StaticJsonDocument<256> doc;
-  doc["ssid"] = newSsid;
-  doc["password"] = newPass;
-
-  File file = SPIFFS.open("/wifi.json", "w");
-  if(!file) {
-    Serial.println("Erro ao abrir arquivo para salvar WiFi");
-    return;
-  }
-  serializeJson(doc, file);
-  file.close();
-  Serial.println("Credenciais WiFi salvas");
-  ssid = newSsid;
-  password = newPass;
-}
-
-// Página para configuração WiFi
-void paginaConfig() {
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Configurar WiFi</title></head><body>";
-  html += "<h1>Configurar WiFi</h1>";
-  html += "<form action='/salvar' method='POST'>";
-  html += "SSID: <input type='text' name='ssid' required><br>";
-  html += "Senha: <input type='password' name='password' required><br>";
-  html += "<input type='submit' value='Salvar'>";
-  html += "</form></body></html>";
-  server.send(200, "text/html", html);
-}
-
-// Rota para salvar credenciais
-void salvarWiFi() {
-  if(server.hasArg("ssid") && server.hasArg("password")) {
-    String newSsid = server.arg("ssid");
-    String newPass = server.arg("password");
-
-    salvarCredenciais(newSsid, newPass);
-
-    String resposta = "<!DOCTYPE html><html><body><h1>Credenciais salvas!</h1><p>Reinicie o dispositivo para conectar.</p></body></html>";
-    server.send(200, "text/html", resposta);
-  } else {
-    server.send(400, "text/plain", "Dados inválidos");
-  }
-}
-
-// Tenta conectar WiFi com SSID e senha salvos
-bool conectarWiFi() {
-  if(ssid.length() == 0) {
-    Serial.println("SSID vazio, não tenta conectar");
-    return false;
-  }
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), password.c_str());
-  Serial.printf("Tentando conectar a %s\n", ssid.c_str());
-
-  unsigned long inicio = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - inicio < 20000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi conectado!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-    return true;
-  } else {
-    Serial.println("Falha ao conectar WiFi");
-    return false;
-  }
-}
-
-void iniciarAP() {
-  WiFi.mode(WIFI_AP);
-  const char* apSSID = "Configurar Dispositivo GASense";
-  bool apOk = WiFi.softAP(apSSID);
-  if(apOk) {
-    Serial.printf("AP iniciado: %s\n", apSSID);
-  } else {
-    Serial.println("Erro ao iniciar AP");
-  }
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("IP do AP: ");
-  Serial.println(IP);
-
-  server.on("/", paginaConfig);
-  server.on("/salvar", HTTP_POST, salvarWiFi);
-  server.begin();
-  Serial.println("Servidor web iniciado");
-}
 
 void setup() {
   Serial.begin(115200);
-  pinMode(MQ2_PIN, INPUT);
-  pinMode(MQ4_PIN, INPUT);
-  pinMode(MQ135_PIN, INPUT);
-  pinMode(KY026_PIN, INPUT);
-  pinMode(BUZZER_PIN, OUTPUT);
-  dht.begin();
+  Serial.println("\nIniciando dispositivo...");
 
-  // Tenta carregar credenciais
-  if(!carregarCredenciais() || !conectarWiFi()) {
-    // Se falhar, inicia AP para configuração
-    iniciarAP();
+  Serial.println("Gerenciando Watchdog Timer (ESP8266)...");
+  // O WDT de software é habilitado por padrão.
+  // ESP.wdtEnable(timeout_ms); // Opcional: para configurar um timeout específico.
+  // Por agora, vamos apenas garantir que ele seja alimentado no loop.
+
+  Serial.println("Executando Setup...");
+  iniciarSpiffs();
+  carregarCredenciais(ssid, password); // Carrega ssid e password globalmente
+
+  if (ssid.length() > 0 && password.length() > 0) {
+    Serial.println("Credenciais encontradas. Tentando conectar ao WiFi...");
+    if (conectarWiFi(ssid, password)) { // Tenta conectar com as credenciais carregadas
+      inicializarNTP(); // Sincronizar hora se conectado ao WiFi
+    } else {
+      Serial.println("Falha ao conectar com credenciais salvas. Iniciando Modo AP.");
+      iniciarAP(); // Inicia AP se a conexão inicial falhar
+    }
   } else {
-    wifiConectado = true;
-    // Inicializa NTP
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    Serial.println("Nenhuma credencial Wi-Fi salva. Iniciando Modo AP para configuracao.");
+    iniciarAP();
   }
+
+  inicializarSensores();
+  // buffer_dados_inicializar() é chamado aqui, após SPIFFS e antes de qualquer uso do buffer.
+  // A declaração original de inicializarBuffer() em buffer_dados.h/cpp foi renomeada para buffer_dados_inicializar()
+  buffer_dados_inicializar();
+
+  deviceId = obterDeviceId();
+  endpointApi = obterEndpointApi();
+  tokenApi = obterTokenApi();
+  endpointApiStatus = obterEndpointApiStatus();
+  endpointCmdBase = obterEndpointApiComandosBase(); // Obter o endpoint de comandos
+
+  Serial.print("Device ID: ");
+  Serial.println(deviceId);
+  Serial.print("Endpoint API: ");
+  Serial.println(endpointApi);
+  // Não imprima o token da API em produção por segurança
+  // Serial.print("Token API: ");
+  // Serial.println(tokenApi);
+
+  Serial.println("Setup concluido.");
 }
 
 void loop() {
-  if (!wifiConectado) {
-    server.handleClient();
+  //Serial.println("Loop principal..."); // Log muito verboso para o loop
+
+  if (WiFi.getMode() == WIFI_AP) {
+    tratarClienteServidorWeb(); // Lida com requisições HTTP se estiver em modo AP
+  } else {
+    // Não está em modo AP, então gerencia a conexão Wi-Fi (tentativas de reconexão)
+    // As credenciais ssid e password (globais neste arquivo) são usadas pela gerenciarConexaoWiFi
+    gerenciarConexaoWiFi(ssid, password);
+  }
+
+  // Sempre lê os sensores, independente do status da conexão, para acionar o buzzer localmente
+  DadosSensores dadosAtuais = lerDadosSensores();
+  bool condicaoDeRisco = verificarCondicaoRisco(dadosAtuais);
+  controlarBuzzer(condicaoDeRisco);
+
+  // Montar o payload JSON usando a função de comunicacao_api
+  String payloadJson = montarPayloadJson(dadosAtuais, deviceId);
+
+  if (estaConectado()) {
+    Serial.println("WiFi Conectado.");
+    // 1. Tentar enviar dados do buffer primeiro
+    if (buffer_dados_tem_dados()) {
+      Serial.println("Enviando dados do buffer...");
+      int contadorEnviosBuffer = 0;
+      while (buffer_dados_tem_dados() && estaConectado() && contadorEnviosBuffer < 5) { // Limita envios por ciclo
+        String leituraDoBuffer = buffer_dados_ler_proxima_leitura();
+        if (leituraDoBuffer.length() > 0) {
+          // A função enviarDadosApi agora aceita o JSON diretamente.
+          // O controle de tempo interno de enviarDadosApi pode ser um problema aqui.
+          // Idealmente, para envio de buffer, esse controle de tempo deveria ser bypassado
+          // ou a função enviarDadosApi não deveria ter tal controle.
+          // Por agora, vamos chamá-la. Se o envio do buffer for lento devido ao timer interno,
+          // o timer em enviarDadosApi precisará ser removido ou condicional.
+          Serial.print("Enviando do buffer: ");
+          Serial.println(leituraDoBuffer);
+          bool envioBufferOk = enviarDadosApi(leituraDoBuffer, endpointApi, tokenApi);
+
+          if (envioBufferOk) {
+            Serial.println("Leitura do buffer enviada com sucesso. Removendo do buffer.");
+            buffer_dados_remover_leitura_enviada();
+          } else {
+            Serial.println("Falha ao enviar leitura do buffer. Mantera no buffer.");
+            // Se o envio falhar, paramos de tentar enviar o buffer neste ciclo para evitar spamming
+            // e para dar chance da conexão/API se recuperar.
+            break;
+          }
+          contadorEnviosBuffer++;
+        }
+      }
+      if(buffer_dados_tem_dados()){
+         Serial.println("Ainda ha dados no buffer para enviar em proximos ciclos.");
+      } else {
+         if (contadorEnviosBuffer > 0) Serial.println("Buffer de dados esvaziado.");
+      }
+    }
+
+    // 2. Enviar leitura atual
+    Serial.println("Tentando enviar leitura atual...");
+    if (enviarDadosApi(payloadJson, endpointApi, tokenApi)) {
+      Serial.println("Leitura atual enviada com sucesso para API.");
+    } else {
+      Serial.println("Falha ao enviar leitura atual para API. Salvando no buffer...");
+      if (buffer_dados_salvar_leitura(payloadJson)) {
+        Serial.println("Leitura atual salva no buffer devido a falha no envio.");
+      } else {
+        Serial.println("Falha ao salvar leitura atual no buffer (pode estar cheio).");
+      }
+    }
+
+    // Se NTP não sincronizou no setup (ex: WiFi caiu antes de NTP), tentar novamente
+    // Uma forma simples é verificar se o tempo é válido (distante de 1970)
+    // Esta lógica de ressincronização do NTP pode ser melhorada.
+    if (time(nullptr) < 1000000000) { // Se o tempo parecer inválido (ex: perto do epoch)
+        Serial.println("NTP não sincronizado ou perdido, tentando sincronizar novamente...");
+        inicializarNTP();
+    }
+
+    // Envio de Status
+    // Usa INTERVALO_ENVIO_STATUS definido neste arquivo (.ino)
+    if (millis() - ultimoEnvioStatus >= INTERVALO_ENVIO_STATUS || ultimoEnvioStatus == 0) {
+        Serial.println("Preparando para enviar dados de status...");
+        String ip = WiFi.localIP().toString();
+        long rssi = WiFi.RSSI();
+        unsigned long uptime = millis() / 1000; // Uptime em segundos
+        uint32_t heap = ESP.getFreeHeap();
+        int bufferCount = buffer_dados_contar_registros();
+        unsigned int reconnections = conexao_wifi_get_contador_reconexoes();
+
+        String statusPayload = montarPayloadStatus(deviceId, ip, rssi, uptime, heap, bufferCount, reconnections);
+
+        // Usar endpointApiStatus e tokenApi obtidos no setup
+        if (enviarDadosStatus(statusPayload, endpointApiStatus, tokenApi)) {
+            Serial.println("Dados de status enviados com sucesso.");
+        } else {
+            Serial.println("Falha ao enviar dados de status.");
+        }
+        ultimoEnvioStatus = millis();
+    }
+
+    // Polling de Comandos Remotos
+    // Usa INTERVALO_POLLING_COMANDOS definido neste arquivo (.ino)
+    // Usa ultimoPollingComandos definido neste arquivo (.ino)
+    if (millis() - ultimoPollingComandos >= INTERVALO_POLLING_COMANDOS || ultimoPollingComandos == 0) {
+        Serial.println("Verificando comandos remotos...");
+        String comandos = buscarComandosRemotos(deviceId, endpointCmdBase, tokenApi);
+
+        if (comandos.length() > 0) {
+            Serial.print("Resposta da API de comandos: ");
+            Serial.println(comandos);
+            if (comandos != "[]") {
+                 processarComandosRecebidos(comandos);
+            } else {
+                Serial.println("Nenhum comando novo (array vazio).");
+            }
+        } else {
+            Serial.println("Nenhuma resposta ou erro ao buscar comandos.");
+        }
+        ultimoPollingComandos = millis();
+    }
+
+  } else {
+    // Se não estiver conectado ao Wi-Fi (e não em modo AP):
+    Serial.println("WiFi desconectado.");
+    Serial.println("Salvando leitura atual no buffer SPIFFS...");
+    if (buffer_dados_salvar_leitura(payloadJson)) {
+      Serial.println("Leitura atual salva no buffer.");
+    } else {
+      Serial.println("Falha ao salvar leitura atual no buffer (pode estar cheio).");
+    }
+    // A antiga chamada adicionarAoBuffer(dadosAtuais) foi substituída pela de cima.
+  }
+
+  // Pequeno delay para estabilidade e para permitir que tarefas de baixo nível (como WiFi) rodem.
+  delay(1000);
+  ESP.wdtFeed(); // Alimenta o watchdog timer do ESP8266
+}
+
+void processarComandosRecebidos(const String& comandosJson) {
+  if (comandosJson.length() == 0 || comandosJson == "[]") {
+    // Serial.println("Nenhum comando para processar ou JSON vazio."); // Log opcional
     return;
   }
 
-  unsigned long agora = millis();
+  StaticJsonDocument<1024> doc; // Ajustar tamanho conforme o tamanho máximo esperado do JSON de comandos
+  DeserializationError error = deserializeJson(doc, comandosJson);
 
-  float temperatura = dht.readTemperature();
-  float umidade = dht.readHumidity();
+  if (error) {
+    Serial.print("Falha ao parsear JSON de comandos: ");
+    Serial.println(error.c_str());
+    return;
+  }
 
-  int gas_mq2 = analogRead(MQ2_PIN);
-  int gas_mq4 = analogRead(MQ4_PIN);
-  int gas_mq135 = analogRead(MQ135_PIN);
-  bool chama = (digitalRead(KY026_PIN) == LOW);
+  if (!doc.is<JsonArray>()) {
+    Serial.println("JSON de comandos nao e um array.");
+    return;
+  }
 
-  bool risco = (gas_mq2 > LIMITE_MQ2 || gas_mq4 > LIMITE_MQ4 || gas_mq135 > LIMITE_MQ135 || chama == LIMITE_CHAMA);
+  JsonArray arrayDeComandos = doc.as<JsonArray>();
+  if (arrayDeComandos.isNull() || arrayDeComandos.size() == 0) {
+    Serial.println("Array de comandos vazio ou invalido.");
+    return;
+  }
 
-  digitalWrite(BUZZER_PIN, risco ? HIGH : LOW);
+  Serial.print("Processando ");
+  Serial.print(arrayDeComandos.size());
+  Serial.println(" comando(s):");
 
-  unsigned long intervalo = risco ? INTERVALO_ALERTA : INTERVALO_NORMAL;
-
-  if (agora - ultimoEnvio >= intervalo) {
-    if (WiFi.status() == WL_CONNECTED) {
-      HTTPClient http;
-      http.begin(apiEndpoint);
-      http.addHeader("Content-Type", "application/json");
-      http.addHeader("Authorization", String(token));
-
-      struct tm timeinfo;
-      if (!getLocalTime(&timeinfo)) {
-        Serial.println("Erro ao obter hora");
-        return;
-      }
-
-      char dataHoraISO[30];
-      strftime(dataHoraISO, sizeof(dataHoraISO), "%Y-%m-%dT%H:%M:%S", &timeinfo);
-
-      StaticJsonDocument<256> body;
-      body["data_hora"] = dataHoraISO;
-      body["temperatura"] = temperatura;
-      body["umidade"] = umidade;
-      body["fogo"] = chama;
-      body["gas_glp"] = gas_mq2;
-      body["compostos_toxicos"] = gas_mq135;
-      body["gas_metano"] = gas_mq4;
-
-      String json;
-      serializeJson(body, json);
-
-      int response = http.POST(json);
-
-      Serial.println("Payload enviado:");
-      Serial.println(json);
-      Serial.print("Código de resposta: ");
-      Serial.println(response);
-
-      http.end();
+  for (JsonObject comandoObj : arrayDeComandos) {
+    if (!comandoObj.containsKey("comando")) {
+      Serial.println("Comando sem o campo 'comando'. Pulando.");
+      continue;
     }
-    ultimoEnvio = agora;
+    String comando = comandoObj["comando"].as<String>();
+    Serial.print("  - Executando comando: ");
+    Serial.println(comando);
+
+    if (comando == "reiniciar") {
+      Serial.println("    Dispositivo reiniciando por comando remoto...");
+      delay(1000); // Pequeno delay para permitir o log
+      ESP.restart();
+    } else if (comando == "silenciar_buzzer") {
+      unsigned long duracao = DURACAO_SILENCIO_BUZZER_MS_PADRAO; // Usa o padrão de sensores.cpp
+      if (comandoObj.containsKey("duracao_ms")) {
+        duracao = comandoObj["duracao_ms"].as<unsigned long>();
+      }
+      Serial.print("    Buzzer silenciado por ");
+      Serial.print(duracao / 1000);
+      Serial.println(" segundos.");
+      sensores_silenciar_buzzer_temporariamente(duracao); // Passa a duração correta
+    } else if (comando == "reativar_buzzer") {
+      Serial.println("    Buzzer reativado por comando remoto.");
+      sensores_reativar_buzzer();
+    } else {
+      Serial.print("    Comando desconhecido: ");
+      Serial.println(comando);
+    }
   }
 }
