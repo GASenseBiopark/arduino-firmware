@@ -2,6 +2,7 @@
 #include <HTTPClient.h>
 #include <DHT.h>
 #include <ArduinoJson.h>
+#include "time.h"
 
 #define MQ2_PIN 35
 #define MQ4_PIN 32
@@ -14,8 +15,8 @@
 DHT dht(DHT11_PIN, DHTTYPE);
 
 // Conexão da rede Wifi - 2.4 MHz
-const char* ssid = "ZAVATINI FELTRIN";
-const char* password = "19012007";
+const char* ssid = "BPK-ALUNOS";
+const char* password = "2020alunos";
 
 // Endpoint da API
 const char* apiEndpoint = "http://15.229.0.216:8080/gravarLeituras";
@@ -28,10 +29,15 @@ const unsigned long INTERVALO_ALERTA = 1000;  // 1s
 unsigned long ultimoEnvio = 0;
 
 // Limites aceitáveis
-const int LIMITE_MQ2 = 400;
-const int LIMITE_MQ4 = 400;
-const int LIMITE_MQ135 = 400;
+const int LIMITE_MQ2 = 600;
+const int LIMITE_MQ4 = 600;
+const int LIMITE_MQ135 = 600;
 const bool LIMITE_CHAMA = true; // true = fogo detectado
+
+// Configuração do servidor NTP
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -10800;    // UTC-3 (horário de Brasília)
+const int daylightOffset_sec = 0;  // Sem horário de verão
 
 void setup() {
   Serial.begin(115200);
@@ -51,6 +57,9 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nWiFi conectado!");
+
+  // Inicializa o NTP
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 }
 
 void loop() {
@@ -78,16 +87,26 @@ void loop() {
       HTTPClient http;
       http.begin(apiEndpoint);
       http.addHeader("Content-Type", "application/json");
-      http.addHeader("Authorization", "Bearer " + String(token));
+      http.addHeader("Authorization", String(token));
+
+      // Obter a hora atual formatada em ISO 8601
+      struct tm timeinfo;
+      if (!getLocalTime(&timeinfo)) {
+        Serial.println("Erro ao obter hora");
+        return;
+      }
+
+      char dataHoraISO[30];
+      strftime(dataHoraISO, sizeof(dataHoraISO), "%Y-%m-%dT%H:%M:%S", &timeinfo);
 
       StaticJsonDocument<256> body;
-      body["temperatura"] = temperatura;
-      body["umidade"] = umidade;
-      body["mq2"] = gas_mq2;
-      body["mq4"] = gas_mq4;
-      body["mq135"] = gas_mq135;
-      body["chama"] = chama;
-      body["alerta"] = risco;
+      body["data_hora"] = dataHoraISO;
+      body["temperatura"] = 32;
+      body["umidade"] = 55;
+      body["fogo"] = chama;
+      body["gas_glp"] = gas_mq2;
+      body["compostos_toxicos"] = gas_mq135;
+      body["gas_metano"] = gas_mq4;
 
       String json;
       serializeJson(body, json);
