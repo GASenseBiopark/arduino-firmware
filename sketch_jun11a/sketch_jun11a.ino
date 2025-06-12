@@ -12,6 +12,7 @@
 #define DHT11_PIN 4
 #define KY026_PIN 14
 #define BUZZER_PIN 27
+#define RESET_WIFI_PIN 25
 
 #define DHTTYPE DHT11
 DHT dht(DHT11_PIN, DHTTYPE);
@@ -28,33 +29,33 @@ const char* apiEndpoint = "http://15.229.0.216:8080/gravarLeituras";
 const char* token = "mX9$wP7#qR2!vB8@zLtF4&GjKdY1NcU";
 
 // Intervalos
-const unsigned long INTERVALO_NORMAL = 15000; // 15s
-const unsigned long INTERVALO_ALERTA = 1000;  // 1s
+const unsigned long INTERVALO_NORMAL = 15000;  // 15s
+const unsigned long INTERVALO_ALERTA = 1000;   // 1s
 unsigned long ultimoEnvio = 0;
 
 // Limites
 const int LIMITE_MQ2 = 600;
 const int LIMITE_MQ4 = 600;
 const int LIMITE_MQ135 = 600;
-const bool LIMITE_CHAMA = true; // true = fogo detectado
+const bool LIMITE_CHAMA = true;  // true = fogo detectado
 
 // Configuração do servidor NTP
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = -10800;    // UTC-3 (horário de Brasília)
-const int daylightOffset_sec = 0;      // Sem horário de verão
+const long gmtOffset_sec = -10800;  // UTC-3 (horário de Brasília)
+const int daylightOffset_sec = 0;   // Sem horário de verão
 
 // Função para carregar WiFi salvo do SPIFFS
 bool carregarCredenciais() {
-  if(!SPIFFS.begin(true)){
+  if (!SPIFFS.begin(true)) {
     Serial.println("Erro ao montar SPIFFS");
     return false;
   }
-  if(!SPIFFS.exists("/wifi.json")) {
+  if (!SPIFFS.exists("/wifi.json")) {
     Serial.println("Arquivo de WiFi não existe");
     return false;
   }
   File file = SPIFFS.open("/wifi.json", "r");
-  if(!file) {
+  if (!file) {
     Serial.println("Erro ao abrir arquivo de WiFi");
     return false;
   }
@@ -65,13 +66,19 @@ bool carregarCredenciais() {
 
   StaticJsonDocument<256> doc;
   auto err = deserializeJson(doc, buf.get());
-  if(err) {
+  if (err) {
     Serial.println("Erro ao desserializar JSON");
     return false;
   }
   ssid = String((const char*)doc["ssid"]);
   password = String((const char*)doc["password"]);
   Serial.printf("Credenciais carregadas: SSID=%s\n", ssid.c_str());
+  Serial.print("Conectando a SSID: '");
+  Serial.print(ssid);
+  Serial.println("'");
+  Serial.print("Com senha: '");
+  Serial.print(password);
+  Serial.println("'");
   return true;
 }
 
@@ -82,7 +89,7 @@ void salvarCredenciais(String newSsid, String newPass) {
   doc["password"] = newPass;
 
   File file = SPIFFS.open("/wifi.json", "w");
-  if(!file) {
+  if (!file) {
     Serial.println("Erro ao abrir arquivo para salvar WiFi");
     return;
   }
@@ -95,34 +102,200 @@ void salvarCredenciais(String newSsid, String newPass) {
 
 // Página para configuração WiFi
 void paginaConfig() {
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Configurar WiFi</title></head><body>";
-  html += "<h1>Configurar WiFi</h1>";
-  html += "<form action='/salvar' method='POST'>";
-  html += "SSID: <input type='text' name='ssid' required><br>";
-  html += "Senha: <input type='password' name='password' required><br>";
-  html += "<input type='submit' value='Salvar'>";
-  html += "</form></body></html>";
+  int numRedes = WiFi.scanNetworks();
+  String options = "";
+
+  for (int i = 0; i < numRedes; i++) {
+    String ssid = WiFi.SSID(i);
+    options += "<option value='" + ssid + "'>" + ssid + "</option>";
+  }
+
+  String html = R"rawliteral(
+  <!DOCTYPE html>
+  <html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configurar WiFi</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background: #f0f2f5;
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 1rem;
+      }
+      .card {
+        background: white;
+        padding: 2rem;
+        border-radius: 24px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+        width: 100%;
+        max-width: 420px;
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin-bottom: 1.5rem;
+        color: #333;
+        text-align: center;
+      }
+      select,
+      input[type='text'],
+      input[type='password'] {
+        width: 100%;
+        padding: 0.85rem;
+        margin-bottom: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 18px;
+        font-size: 1rem;
+      }
+      input[type='submit'] {
+        width: 100%;
+        padding: 0.85rem;
+        background-color: #007BFF;
+        color: white;
+        font-size: 1rem;
+        border: none;
+        border-radius: 20px;
+        cursor: pointer;
+      }
+      input[type='submit']:hover {
+        background-color: #0056b3;
+      }
+      @media (max-width: 480px) {
+        .card {
+          padding: 1.5rem;
+          border-radius: 20px;
+        }
+        h1 {
+          font-size: 1.4rem;
+        }
+        select,
+        input[type='text'],
+        input[type='password'],
+        input[type='submit'] {
+          font-size: 0.95rem;
+          padding: 0.75rem;
+        }
+      }
+    </style>
+    <script>
+      function toggleInput(select) {
+        const outroInput = document.getElementById('ssid_manual');
+        if (select.value === 'outro') {
+          outroInput.style.display = 'block';
+          outroInput.required = true;
+        } else {
+          outroInput.style.display = 'none';
+          outroInput.required = false;
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Configurar Wi-Fi</h1>
+      <form action="/salvar" method="POST">
+        <select name="ssid" onchange="toggleInput(this)" required>
+  )rawliteral";
+
+  html += options;
+  html += "<option value='outro'>Outro...</option>";
+
+  html += R"rawliteral(
+        </select>
+        <input type="text" id="ssid_manual" name="ssid" placeholder="Digite o SSID" style="display: none;">
+        <input type="password" name="password" placeholder="Senha" required>
+        <input type="submit" value="Salvar">
+      </form>
+    </div>
+  </body>
+  </html>
+  )rawliteral";
+
   server.send(200, "text/html", html);
 }
 
+
+
 // Rota para salvar credenciais
 void salvarWiFi() {
-  if(server.hasArg("ssid") && server.hasArg("password")) {
+  if (server.hasArg("ssid") && server.hasArg("password")) {
     String newSsid = server.arg("ssid");
     String newPass = server.arg("password");
 
     salvarCredenciais(newSsid, newPass);
 
-    String resposta = "<!DOCTYPE html><html><body><h1>Credenciais salvas!</h1><p>Reinicie o dispositivo para conectar.</p></body></html>";
+    String resposta = R"rawliteral(
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Salvo com Sucesso</title>
+      <style>
+        * {
+          box-sizing: border-box;
+          margin: 0;
+          padding: 0;
+        }
+        body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background: #f0f2f5;
+          height: 100vh;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          padding: 1rem;
+        }
+        .card {
+          background: white;
+          padding: 2rem;
+          border-radius: 24px;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+          width: 100%;
+          max-width: 420px;
+          text-align: center;
+        }
+        h1 {
+          font-size: 1.6rem;
+          margin-bottom: 1rem;
+          color: #28a745;
+        }
+        p {
+          font-size: 1rem;
+          color: #333;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>Credenciais salvas!</h1>
+        <p>Reinicie o dispositivo para conectar à rede Wi-Fi.</p>
+      </div>
+    </body>
+    </html>
+    )rawliteral";
+
     server.send(200, "text/html", resposta);
+    delay(3000);  // Tempo para o usuário ver a mensagem
+    ESP.restart();
   } else {
     server.send(400, "text/plain", "Dados inválidos");
   }
 }
 
+
 // Tenta conectar WiFi com SSID e senha salvos
 bool conectarWiFi() {
-  if(ssid.length() == 0) {
+  if (ssid.length() == 0) {
     Serial.println("SSID vazio, não tenta conectar");
     return false;
   }
@@ -152,7 +325,7 @@ void iniciarAP() {
   WiFi.mode(WIFI_AP);
   const char* apSSID = "Configurar Dispositivo GASense";
   bool apOk = WiFi.softAP(apSSID);
-  if(apOk) {
+  if (apOk) {
     Serial.printf("AP iniciado: %s\n", apSSID);
   } else {
     Serial.println("Erro ao iniciar AP");
@@ -174,10 +347,11 @@ void setup() {
   pinMode(MQ135_PIN, INPUT);
   pinMode(KY026_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RESET_WIFI_PIN, INPUT_PULLUP);
   dht.begin();
 
   // Tenta carregar credenciais
-  if(!carregarCredenciais() || !conectarWiFi()) {
+  if (!carregarCredenciais() || !conectarWiFi()) {
     // Se falhar, inicia AP para configuração
     iniciarAP();
   } else {
@@ -189,10 +363,25 @@ void setup() {
 
 void loop() {
   if (!wifiConectado) {
-    server.handleClient();
-    return;
+    server.handleClient();  // Necessário para processar requisições web
   }
 
+  if (digitalRead(RESET_WIFI_PIN) == LOW) {
+    delay(50);  // debounce
+    if (digitalRead(RESET_WIFI_PIN) == LOW) {
+      SPIFFS.begin(true);
+      if (SPIFFS.exists("/wifi.json")) {
+        SPIFFS.remove("/wifi.json");
+        Serial.println("Wi-Fi resetado por botão.");
+      }
+      while (digitalRead(RESET_WIFI_PIN) == LOW)
+        ;  // espera soltar
+      delay(1000);
+      ESP.restart();
+    }
+  }
+
+  
   unsigned long agora = millis();
 
   float temperatura = dht.readTemperature();
@@ -212,7 +401,10 @@ void loop() {
   if (agora - ultimoEnvio >= intervalo) {
     if (WiFi.status() == WL_CONNECTED) {
       HTTPClient http;
+      http.setReuse(false);
       http.begin(apiEndpoint);
+      http.setReuse(false);
+      http.setTimeout(10000); 
       http.addHeader("Content-Type", "application/json");
       http.addHeader("Authorization", String(token));
 
@@ -241,10 +433,16 @@ void loop() {
 
       Serial.println("Payload enviado:");
       Serial.println(json);
-      Serial.print("Código de resposta: ");
-      Serial.println(response);
+
+      if (response > 0) {
+        Serial.print("Código de resposta: ");
+        Serial.println(response);
+      } else {
+        Serial.printf("Erro HTTP: %d -> %s\n", response, http.errorToString(response).c_str());
+      }
 
       http.end();
+      delay(5000);
     }
     ultimoEnvio = agora;
   }
