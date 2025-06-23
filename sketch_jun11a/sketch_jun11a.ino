@@ -37,12 +37,49 @@ unsigned long ultimoEnvio = 0;
 const int LIMITE_MQ2 = 600;
 const int LIMITE_MQ4 = 600;
 const int LIMITE_MQ135 = 600;
-const bool LIMITE_CHAMA = true;  // true = fogo detectado
+const bool LIMITE_FOGO = true;  // true = fogo detectado
 
 // Configuração do servidor NTP
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -10800;  // UTC-3 (horário de Brasília)
 const int daylightOffset_sec = 0;   // Sem horário de verão
+
+// Baseline fixo baseado nos dados fornecidos
+const int baselineMQ2 = 400;
+const int baselineMQ4 = 120;
+const int baselineMQ135 = 305;
+
+// Média móvel
+#define TAM_BUFFER 10
+int bufferMQ2[TAM_BUFFER] = {0};
+int bufferMQ4[TAM_BUFFER] = {0};
+int bufferMQ135[TAM_BUFFER] = {0};
+int indice = 0;
+
+int media(int *buffer) {
+  long soma = 0;
+  for (int i = 0; i < TAM_BUFFER; i++) {
+    soma += buffer[i];
+  }
+  return soma / TAM_BUFFER;
+}
+
+// Conversão para PPM com base nos seus dados
+float mq2_ppm(int adc) {
+  float ratio = (float)baselineMQ2 / adc;
+  return pow(ratio, 3.0) * 50;  // ajuste para GLP
+}
+
+float mq4_ppm(int adc) {
+  float ratio = (float)baselineMQ4 / adc;
+  return pow(ratio, 2.5) * 40;  // ajuste para metano
+}
+
+float mq135_ppm(int adc) {
+  float ratio = (float)baselineMQ135 / adc;
+  return pow(ratio, 2.7) * 30;  // ajuste para compostos tóxicos
+}
+
 
 // Função para carregar WiFi salvo do SPIFFS
 bool carregarCredenciais() {
@@ -384,15 +421,32 @@ void loop() {
   
   unsigned long agora = millis();
 
+  // Leitura bruta dos sensores
+  int leituraMQ2 = analogRead(MQ2_PIN);
+  int leituraMQ4 = analogRead(MQ4_PIN);
+  int leituraMQ135 = analogRead(MQ135_PIN);
+
+  // Atualiza os buffers
+  bufferMQ2[indice] = leituraMQ2;
+  bufferMQ4[indice] = leituraMQ4;
+  bufferMQ135[indice] = leituraMQ135;
+  indice = (indice + 1) % TAM_BUFFER;
+
+  // Aplica média móvel
+  int mediaMQ2 = media(bufferMQ2);
+  int mediaMQ4 = media(bufferMQ4);
+  int mediaMQ135 = media(bufferMQ135);
+
+  // Conversão para PPM
+  float ppmMQ2 = mq2_ppm(mediaMQ2);
+  float ppmMQ4 = mq4_ppm(mediaMQ4);
+  float ppmMQ135 = mq135_ppm(mediaMQ135);
+
   float temperatura = dht.readTemperature();
   float umidade = dht.readHumidity();
+  bool fogo = (digitalRead(KY026_PIN) == LOW);
 
-  int gas_mq2 = analogRead(MQ2_PIN);
-  int gas_mq4 = analogRead(MQ4_PIN);
-  int gas_mq135 = analogRead(MQ135_PIN);
-  bool chama = (digitalRead(KY026_PIN) == LOW);
-
-  bool risco = (gas_mq2 > LIMITE_MQ2 || gas_mq4 > LIMITE_MQ4 || gas_mq135 > LIMITE_MQ135 || chama == LIMITE_CHAMA);
+  bool risco = (ppmMQ2 > LIMITE_MQ2 || ppmMQ4 > LIMITE_MQ4 || ppmMQ135 > LIMITE_MQ135 || fogo == LIMITE_FOGO);
 
   digitalWrite(BUZZER_PIN, risco ? HIGH : LOW);
 
@@ -421,10 +475,10 @@ void loop() {
       body["data_hora"] = dataHoraISO;
       body["temperatura"] = temperatura;
       body["umidade"] = umidade;
-      body["fogo"] = chama;
-      body["gas_glp"] = gas_mq2;
-      body["compostos_toxicos"] = gas_mq135;
-      body["gas_metano"] = gas_mq4;
+      body["fogo"] = fogo;
+        body["gas_glp"] = ppmMQ2;
+  body["gas_metano"] = ppmMQ4;
+  body["compostos_toxicos"] = ppmMQ135;
 
       String json;
       serializeJson(body, json);
