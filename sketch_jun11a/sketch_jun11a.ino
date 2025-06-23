@@ -34,9 +34,9 @@ const unsigned long INTERVALO_ALERTA = 1000;   // 1s
 unsigned long ultimoEnvio = 0;
 
 // Limites
-const int LIMITE_MQ2 = 600;
-const int LIMITE_MQ4 = 600;
-const int LIMITE_MQ135 = 600;
+const int LIMITE_MQ2 = 1000;
+const int LIMITE_MQ4 = 700;
+const int LIMITE_MQ135 = 300;
 const bool LIMITE_FOGO = true;  // true = fogo detectado
 
 // Configuração do servidor NTP
