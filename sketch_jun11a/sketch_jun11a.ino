@@ -51,12 +51,12 @@ const int baselineMQ135 = 305;
 
 // Média móvel
 #define TAM_BUFFER 10
-int bufferMQ2[TAM_BUFFER] = {0};
-int bufferMQ4[TAM_BUFFER] = {0};
-int bufferMQ135[TAM_BUFFER] = {0};
+int bufferMQ2[TAM_BUFFER] = { 0 };
+int bufferMQ4[TAM_BUFFER] = { 0 };
+int bufferMQ135[TAM_BUFFER] = { 0 };
 int indice = 0;
 
-int media(int *buffer) {
+int media(int* buffer) {
   long soma = 0;
   for (int i = 0; i < TAM_BUFFER; i++) {
     soma += buffer[i];
@@ -418,7 +418,7 @@ void loop() {
     }
   }
 
-  
+
   unsigned long agora = millis();
 
   // Leitura bruta dos sensores
@@ -458,7 +458,7 @@ void loop() {
       http.setReuse(false);
       http.begin(apiEndpoint);
       http.setReuse(false);
-      http.setTimeout(10000); 
+      http.setTimeout(10000);
       http.addHeader("Content-Type", "application/json");
       http.addHeader("Authorization", String(token));
 
@@ -476,9 +476,9 @@ void loop() {
       body["temperatura"] = temperatura;
       body["umidade"] = umidade;
       body["fogo"] = fogo;
-        body["gas_glp"] = ppmMQ2;
-  body["gas_metano"] = ppmMQ4;
-  body["compostos_toxicos"] = ppmMQ135;
+      body["gas_glp"] = ppmMQ2;
+      body["gas_metano"] = ppmMQ4;
+      body["compostos_toxicos"] = ppmMQ135;
 
       String json;
       serializeJson(body, json);
